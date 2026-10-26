@@ -11,7 +11,11 @@ target location.
 Target files are staged on tmpfs so each patch reads/writes the staged copy,
 and only one real disk write happens per target at the end.
 
-Usage: apply_patches.py <patches_dir> <app_dir>
+Usage: apply_patches.py [--windows] <patches_dir> <app_dir>
+
+--windows applies the Windows build's set instead (scripts/windows/
+build-windows.sh): the WINDOWS_PATCH_SET patches from the category subdirs,
+then every patch in patches/windows/, which no Linux build discovers.
 
 <app_dir> is the directory that contains app.asar.contents/, i.e. the same
 path that build-patched-tarball.sh uses as "$WORK_DIR/app".
@@ -34,6 +38,22 @@ PATCH_SUBDIRS = ("linux", "core", "community")
 # than quietly ship a release with a patch missing. Bump this when you add or
 # remove a patch.
 EXPECTED_PATCH_COUNT = 61
+
+# The Windows build (--windows). patches/windows/ holds the Windows-only
+# patches; they are applied AFTER the shared ones (on a shared target, their
+# prefix injections then land ahead of the others). Pinned like
+# EXPECTED_PATCH_COUNT.
+WINDOWS_SUBDIR = "windows"
+EXPECTED_WINDOWS_PATCH_COUNT = 1
+# Shared patches the Windows build carries: custom models, the Settings ->
+# Extra page that configures them, and the profile name in the window title.
+# Everything else is Linux-specific or not ported yet (docs/windows.md).
+WINDOWS_PATCH_SET = (
+    "add_feature_custom_models",
+    "add_feature_extra_settings",
+    "add_feature_extra_settings_bridge",
+    "fix_profile_window_title",
+)
 
 # Byte strings that only ever appear in a bundle one of our builds already
 # patched: every injected identifier starts with `__cdb`, and
@@ -214,12 +234,58 @@ def run_nim_patch(nim_bin: Path, target_file: Path) -> bool:
         return False
 
 
-def main():
-    if len(sys.argv) != 3:
-        print("Usage: apply_patches.py <patches_dir> <app_dir>", file=sys.stderr)
+def select_windows_sources(patches_dir: Path, sources):
+    """The Windows build's patches: WINDOWS_PATCH_SET, then patches/windows/."""
+    by_stem = {pf.stem: (pf, t, ty) for pf, t, ty in sources}
+    missing = [n for n in WINDOWS_PATCH_SET if n not in by_stem]
+    if missing:
+        print(
+            f"[ERROR] WINDOWS_PATCH_SET names patch(es) that do not exist: "
+            f"{', '.join(missing)}",
+            file=sys.stderr,
+        )
         sys.exit(1)
-    patches_dir = Path(sys.argv[1]).resolve()
-    app_dir = Path(sys.argv[2]).resolve()
+    # Keep the shared patches in their usual (basename) order.
+    shared = [s for s in sources if s[0].stem in WINDOWS_PATCH_SET]
+    win_dir = patches_dir / WINDOWS_SUBDIR
+    if not win_dir.is_dir():
+        print(f"[ERROR] Missing patch directory: {win_dir}", file=sys.stderr)
+        sys.exit(1)
+    own = []
+    for pf in sorted((p for p in win_dir.iterdir() if p.is_file()), key=lambda p: p.name):
+        target_spec, ptype = parse_headers(pf)
+        if target_spec and ptype:
+            own.append((pf, target_spec, ptype))
+    if len(own) != EXPECTED_WINDOWS_PATCH_COUNT:
+        print(
+            f"\n[ERROR] Discovered {len(own)} Windows patch source(s) in "
+            f"{win_dir}, expected {EXPECTED_WINDOWS_PATCH_COUNT}.\n"
+            "        If you added or removed one, update "
+            "EXPECTED_WINDOWS_PATCH_COUNT in this script.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(
+        f"  Windows build: {len(shared)} shared patch(es) + {len(own)} "
+        f"Windows patch(es)"
+    )
+    return shared + own
+
+
+def main():
+    args = sys.argv[1:]
+    windows = False
+    if args[:1] == ["--windows"]:
+        windows = True
+        args = args[1:]
+    if len(args) != 2:
+        print(
+            "Usage: apply_patches.py [--windows] <patches_dir> <app_dir>",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    patches_dir = Path(args[0]).resolve()
+    app_dir = Path(args[1]).resolve()
 
     if not patches_dir.is_dir():
         print(f"[ERROR] patches_dir not found: {patches_dir}", file=sys.stderr)
@@ -267,6 +333,9 @@ def main():
             file=sys.stderr,
         )
         sys.exit(1)
+
+    if windows:
+        sources = select_windows_sources(patches_dir, sources)
 
     replace_jobs = []  # list[(patch_file, real_target)]
     nim_jobs_by_target = {}  # real_target -> list[(patch_file, nim_binary)]

@@ -1,0 +1,197 @@
+name: Build Windows
+
+# The portable Windows 11 build (docs/windows.md): Anthropic's official Windows
+# package, patched with the Windows patch set (apply_patches.py --windows on a
+# copy of the sources), integrity hash rewritten, zipped with an installer
+# script.
+#
+# Runs on PRs that touch the Windows build, by hand, and from the daily
+# upstream-sync.yml (workflow_call) when upstream or Anthropic's Windows
+# version moved.
+#
+# Built on Linux like every other package, then booted on a real Windows runner:
+# a broken integrity hash or a patch that throws at startup shows up there, not
+# on a user's machine.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Upstream Windows version (empty = the current release in RELEASES)'
+        required: false
+        default: ''
+      publish:
+        description: 'Publish the zips as a GitHub release (tag windows-v<version>)'
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: ''
+      publish:
+        type: boolean
+        default: false
+      ref:
+        description: 'Commit or branch to build (empty = the triggering commit)'
+        type: string
+        default: ''
+    outputs:
+      version:
+        value: ${{ jobs.build.outputs.version }}
+  pull_request:
+    branches: [master]
+    paths:
+      - 'scripts/windows/**'
+      - 'packaging/windows/**'
+      - 'patches/windows/**'
+      - 'js/windows_profiles_main.js'
+      - 'js/custom_models_*.js'
+      - 'js/extra_settings_*.js'
+      - 'scripts/apply_patches.py'
+      - 'patches/Makefile'
+      - 'scripts/tests/community/test-custom-models-main.mjs'
+      - 'scripts/tests/core/test-extra-settings-dom.mjs'
+      - '.github/workflows/build-windows.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-windows-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: 24.11.1
+  NIM_VERSION: 2.2.4
+  ASAR_VERSION: 3.4.1
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+      sha: ${{ steps.build.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install Node, Nim, asar
+        run: |
+          set -euo pipefail
+          T="$RUNNER_TEMP/tools"; mkdir -p "$T"
+          curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" | tar -xJ -C "$T"
+          curl -fsSL "https://nim-lang.org/download/nim-${NIM_VERSION}-linux_x64.tar.xz" | tar -xJ -C "$T"
+          echo "$T/node-v${NODE_VERSION}-linux-x64/bin" >> "$GITHUB_PATH"
+          echo "$T/nim-${NIM_VERSION}/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
+          export PATH="$T/node-v${NODE_VERSION}-linux-x64/bin:$T/nim-${NIM_VERSION}/bin:$PATH"
+          npm install -g "@electron/asar@${ASAR_VERSION}"
+          nimble install -y regex
+
+      - name: Feature tests on the build sources
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/src"
+          scripts/windows/prepare-sources.sh "$src"
+          node "$src/scripts/tests/community/test-custom-models-main.mjs"
+          node "$src/scripts/tests/windows/test-windows-profiles.mjs"
+          # The runner image ships Google Chrome, which this test finds itself.
+          node "$src/scripts/tests/core/test-extra-settings-dom.mjs"
+
+      - name: Build
+        id: build
+        env:
+          ARCH: ${{ matrix.arch }}
+          WANT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          args=(--arch "$ARCH" --out dist)
+          if [ -n "$WANT_VERSION" ]; then args+=(--version "$WANT_VERSION"); fi
+          scripts/windows/build-windows.sh "${args[@]}"
+          zip=$(ls dist/*.zip)
+          v=$(basename "$zip" | sed -n 's/^claude-desktop-extra-\(.*\)-windows-.*\.zip$/\1/p')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-${{ matrix.arch }}
+          path: dist/
+          retention-days: 14
+
+  smoke-test:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-x64
+          path: dist
+
+      - name: Install and boot a test profile
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Get-ChildItem dist\*.zip | Select-Object -First 1
+          Expand-Archive $zip.FullName -DestinationPath unzipped
+          $dir = Get-ChildItem unzipped -Directory | Select-Object -First 1
+          & (Join-Path $dir.FullName 'Install-ClaudeExtra.ps1') -ProfileName ci
+          $exe = Join-Path $env:LOCALAPPDATA 'Programs\Claude Desktop Extra\app\claude.exe'
+          $lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'Claude Desktop Extra\Claude (ci).lnk'
+          if (-not (Test-Path $exe)) { throw "not installed: $exe" }
+          if (-not (Test-Path $lnk)) { throw "no profile shortcut: $lnk" }
+
+          $p = Start-Process -FilePath $exe -ArgumentList '--profile=ci' -PassThru
+          $log = Join-Path $env:APPDATA 'Claude-ci\logs\claude-patches.log'
+          $deadline = (Get-Date).AddSeconds(90)
+          $want = @("profile 'ci' (requested)", '[custom-models] installed (main)')
+          do {
+            Start-Sleep -Seconds 5
+            $text = if (Test-Path $log) { Get-Content -Raw $log } else { '' }
+            # Contains, not -like: -like reads [custom-models] as a wildcard set.
+            $missing = $want | Where-Object { -not $text.Contains($_) }
+          } while ($missing -and -not $p.HasExited -and (Get-Date) -lt $deadline)
+
+          Write-Host "--- claude-patches.log"; if (Test-Path $log) { Get-Content $log }
+          $main = Get-ChildItem (Join-Path $env:APPDATA 'Claude-ci') -Recurse -Filter main.log -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($main) { Write-Host "--- main.log (tail)"; Get-Content $main.FullName -Tail 40 }
+          if ($p.HasExited) { throw "claude.exe exited with code $($p.ExitCode) (integrity failure or a startup error)" }
+          if ($missing) { throw "startup lines missing from claude-patches.log: $($missing -join '; ')" }
+          Get-Process claude -ErrorAction SilentlyContinue | Stop-Process -Force
+          Write-Host 'claude.exe booted the patched bundle under profile ci'
+
+  publish:
+    if: ${{ inputs.publish }}
+    needs: [build, smoke-test]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          SHA: ${{ needs.build.outputs.sha }}
+        run: |
+          set -euo pipefail
+          tag="windows-v${VERSION}"
+          notes="Portable Windows 11 build of Claude Desktop ${VERSION} with custom models and profiles. Unzip and run Install.cmd. See docs/windows.md."
+          if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" -R "$GITHUB_REPOSITORY" --clobber dist/*.zip dist/*.sha256
+          else
+            # --latest=false: "Latest" stays the Linux release, which the
+            # pacman repo (releases/latest/download) and version-check read.
+            gh release create "$tag" -R "$GITHUB_REPOSITORY" --target "$SHA" --latest=false \
+              --title "Claude Desktop Extra for Windows ${VERSION}" --notes "$notes" \
+              dist/*.zip dist/*.sha256
+          fi

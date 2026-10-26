@@ -4,6 +4,13 @@ All notable changes to the claude-desktop-extra packages will be documented in t
 
 ## 2026-10-26
 
+### Experimental Windows 11 build in this repository
+
+- **The Windows build path from [stratosjl/claude-desktop-extra](https://github.com/stratosjl/claude-desktop-extra) now lives in this tree**: `scripts/windows/` (`build-windows.sh`, `prepare-sources.sh`, `asar_integrity.py`), `packaging/windows/`, `patches/windows/add_windows_profiles.nim`, `js/windows_profiles_main.js`, `docs/windows.md` and the **Build Windows** workflow. It ships Custom models, Profiles and the Settings → Extra page on Anthropic's official Windows package; the Linux-only extras are not part of it.
+- **Linux builds are unchanged.** `apply_patches.py` still discovers exactly the same 61 patches across `linux/`, `core/` and `community/`; `patches/windows/` is discovered only by the new `--windows` flag, which pins it separately in `EXPECTED_WINDOWS_PATCH_COUNT`.
+- **No overlay layer.** The upstream edits the Windows build needs are ordinary files here, so `prepare-sources.sh` now just copies the tracked tree; the daily upstream sync is an ordinary merge instead of a patch that has to keep applying.
+- `scripts/run-feature-tests.sh` gained a `windows` category (`EXPECTED_TEST_HARNESSES` 50 → 51).
+
 ### Computer Use: `open_application` starts Flatpak apps, Chromium web apps and `env`-wrapped launchers (#297)
 
 - **`open_application` now runs the launcher's whole `Exec` line**, on wlroots, GNOME and X11 sessions (KDE Wayland sessions use `kwin-portal-bridge`'s own launcher and were not affected). Until now it started only the bare binary, so a Flatpak app, a Chromium web app or a launcher written as `env VAR=1 app` opened nothing. The line is parsed as the Desktop Entry spec defines it (field codes, quoting, `Path=`, `TryExec`, a leading BOM, GIO's lenient backslash handling) and run as an argv array, with no shell.

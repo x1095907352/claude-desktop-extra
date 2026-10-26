@@ -8,8 +8,8 @@ The official `.deb` (apt repo `https://downloads.claude.ai/claude-desktop/apt`) 
 
 **Layout invariant (2026-07-13):** every package ships the `.deb`'s `usr/lib/claude-desktop/` tree **verbatim** (binary renamed `claude-desktop` -> `claude`; patched `resources/app.asar` exe-adjacent; our CU bridges added to `resources/`). Electron auto-loads the adjacent asar - the official build's `OnlyLoadAppFromAsar` + `EnableEmbeddedAsarIntegrityValidation` fuses are on (integrity is not enforced on Linux, which is why a patched asar boots). The launcher passes NO asar on the command line, so `process.resourcesPath` and `app.isPackaged` behave exactly as on the stock Anthropic `.deb`. Never add a patch that redirects resource paths; put bundled files at their upstream `resources/` position instead. On NixOS the nixpkgs Electron dist is merged with our `resources/` into one directory to preserve the same adjacency.
 
-- **Target platform:** Linux only (X11, Wayland, XWayland). No macOS/Windows code.
-  One exception: custom models (`js/custom_models_main.js`, and its CLI preload `js/custom_models_preload.js`) and the Extra settings page (`js/extra_settings_main.js`, `js/extra_settings_page.js`) also load on `win32`, so the downstream Windows build ([stratosjl/claude-desktop-extra](https://github.com/stratosjl/claude-desktop-extra)) carries them unedited. Keep those win32 branches behind their platform checks and their tests green; they must never change Linux behavior. Do not add Windows code anywhere else.
+- **Target platform:** Linux (X11, Wayland, XWayland) is what every package in `packaging/` ships, and it is the only platform the Linux build path touches. **No macOS code.**
+  The tree also carries an **experimental Windows 11 build** (`docs/windows.md`, `scripts/windows/`, `packaging/windows/`, `patches/windows/`, `.github/workflows/build-windows.yml`). It is a separate build path - `apply_patches.py --windows`, which discovers only `WINDOWS_PATCH_SET` plus `patches/windows/` - so Linux builds never see it and `EXPECTED_PATCH_COUNT` (61) is unaffected. It takes Anthropic's Squirrel `.nupkg` instead of the `.deb`, and rewrites the asar integrity hash in `claude.exe` because Windows enforces `EnableEmbeddedAsarIntegrityValidation`. The `win32` branches in `js/custom_models_main.js`, `js/custom_models_preload.js`, `js/extra_settings_main.js` and `js/extra_settings_page.js` serve that build: keep them behind their `process.platform` checks and their tests green, and never let them change Linux behavior. Windows code belongs in `patches/windows/` or behind a `win32` gate - nowhere else.
 - **Architectures:** x86_64 (primary) and aarch64.
 - **glibc floor:** 2.34 (RHEL 9 / Ubuntu 22.04). Debian 11 is not supported. If upstream's `claude-native-binding.node` asks for a glibc above 2.34 through weak symbols only (v2.19675.1 did, for GLIBC_2.39; v2.26454.0 tops out at 2.34), `scripts/fix-native-glibc-floor.py` marks those version-needs weak at build time; a strong symbol above the floor fails the build, and CI asserts the result.
 - **Native binaries we ship** (the four Computer Use bridges) build for x86_64 AND aarch64, each with a stated glibc floor or as static musl; CI verifies with `objdump -T | grep GLIBC_`. A new native binary picks the floor of its minimum viable distro.
@@ -204,16 +204,18 @@ patches/           # Nim patch sources (.nim) + Makefile, compiled to native bin
 patches/linux/     #   Linux compatibility - always on, not user-configurable (37)
 patches/community/ #   Opt-in features, each with a switch in Settings -> Extra -> Community Features (17)
 patches/core/      #   Always-on infrastructure: Extra settings pages, theme engine, GrowthBook overrides, multi-profile (7)
+patches/windows/   #   Windows build only, discovered by apply_patches.py --windows (1)
 js/                # Shared JS snippets embedded by Nim patches via staticRead ("../../js/..." from a patch)
 scripts/           # Build, validation, and launcher scripts
 scripts/tests/     # Feature test harnesses, grouped like patches/ (run: scripts/run-feature-tests.sh)
-packaging/         # Per-format packaging: apt, debian, rpm, appimage, nix, pacman, arch (PKGBUILD.template + .install)
-docs/              # Per-feature deep-dives, the patch catalog (patches.md), troubleshooting.md, command-line.md
+packaging/         # Per-format packaging: apt, debian, rpm, appimage, nix, pacman, arch (PKGBUILD.template + .install), windows (portable zip)
+scripts/windows/   # Windows build path: build-windows.sh, prepare-sources.sh, asar_integrity.py
+docs/              # Per-feature deep-dives, the patch catalog (patches.md), troubleshooting.md, command-line.md, windows.md
 baseline/          # Version-sensitive reference docs re-validated each release
 .claude/skills/    # Optional Claude Code skills for this repo (/update, /debug, /linux, ...)
 ```
 
-Each patch has a `# @patch-target:` and `# @patch-type: nim` header. The orchestrator (`scripts/apply_patches.py`) discovers them recursively across the three subdirectories and applies them in **basename order** (the directory only classifies a patch, it does not order it). It pins the total in `EXPECTED_PATCH_COUNT` and fails loud when discovery finds a different number - bump the constant in the same commit that adds or removes a patch.
+Each patch has a `# @patch-target:` and `# @patch-type: nim` header. The orchestrator (`scripts/apply_patches.py`) discovers them recursively across `linux/`, `core/` and `community/` and applies them in **basename order** (the directory only classifies a patch, it does not order it). It pins the total in `EXPECTED_PATCH_COUNT` and fails loud when discovery finds a different number - bump the constant in the same commit that adds or removes a patch. `patches/windows/` is discovered only by `--windows` (the Windows build) and pinned separately in `EXPECTED_WINDOWS_PATCH_COUNT`.
 
 ## Test VMs
 

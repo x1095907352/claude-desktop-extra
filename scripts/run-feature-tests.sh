@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run every feature test harness under scripts/tests/{community,core}/.
+# Run every feature test harness under scripts/tests/{community,core,linux,windows}/.
 #
 # WHY THIS EXISTS
 # ---------------
@@ -19,6 +19,7 @@
 #   scripts/run-feature-tests.sh community    # one category only
 #   scripts/run-feature-tests.sh core
 #   scripts/run-feature-tests.sh linux
+#   scripts/run-feature-tests.sh windows
 
 set -uo pipefail
 
@@ -29,18 +30,18 @@ TESTS_DIR="$SCRIPT_DIR/tests"
 # `git mv` changes what gets discovered, this fails rather than quietly reporting
 # a green run over a shrunken suite - the same reasoning as EXPECTED_PATCH_COUNT
 # in scripts/apply_patches.py. Bump this when you add or remove a harness.
-EXPECTED_TEST_HARNESSES=50
+EXPECTED_TEST_HARNESSES=51
 
-CATEGORIES=(community core linux)
+CATEGORIES=(community core linux windows)
 
 usage() {
-    echo "Usage: $(basename "$0") [community|core|linux]" >&2
+    echo "Usage: $(basename "$0") [community|core|linux|windows]" >&2
     exit 2
 }
 
 case "${1-}" in
     "")            ENFORCE_COUNT=true ;;
-    community|core|linux) CATEGORIES=("$1"); ENFORCE_COUNT=false ;;
+    community|core|linux|windows) CATEGORIES=("$1"); ENFORCE_COUNT=false ;;
     -h|--help)     usage ;;
     *)             echo "[ERROR] Unknown category: $1" >&2; usage ;;
 esac
