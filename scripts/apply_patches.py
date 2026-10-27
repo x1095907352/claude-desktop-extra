@@ -44,7 +44,7 @@ EXPECTED_PATCH_COUNT = 61
 # prefix injections then land ahead of the others). Pinned like
 # EXPECTED_PATCH_COUNT.
 WINDOWS_SUBDIR = "windows"
-EXPECTED_WINDOWS_PATCH_COUNT = 1
+EXPECTED_WINDOWS_PATCH_COUNT = 2
 # Shared patches the Windows build carries: custom models, the Settings ->
 # Extra page that configures them, and the profile name in the window title.
 # Everything else is Linux-specific or not ported yet (docs/windows.md).
